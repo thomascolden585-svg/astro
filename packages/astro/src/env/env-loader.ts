@@ -1,6 +1,9 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parse } from 'dotenv';
 import { processEnvAtLaunch } from '../core/env/process-env-snapshot.js';
-import { loadEnv } from 'vite';
+import { loadEnv, normalizePath } from 'vite';
 import type { AstroConfig } from '../types/public/index.js';
 import type { EnvSchema } from './schema.js';
 
@@ -69,10 +72,41 @@ function getPrivateEnv({
 	return privateEnv;
 }
 
-function applyProcessEnvAtLaunch(loaded: Record<string, string>): void {
+/**
+ * Names of variables declared in project `.env*` files (same discovery order as Vite).
+ * Only those keys can have been overwritten on `process.env` by the temporary Vite
+ * instance used to load `astro.config`, so they are the only ones we restore from the
+ * launch snapshot.
+ */
+function getKeysDefinedInEnvFiles(mode: string, envDir: string | false): Set<string> {
+	const keys = new Set<string>();
+	if (envDir === false) {
+		return keys;
+	}
+	const envFiles = ['.env', '.env.local', `.env.${mode}`, `.env.${mode}.local`].map((file) =>
+		normalizePath(path.join(envDir, file)),
+	);
+	for (const filePath of envFiles) {
+		let content: Buffer;
+		try {
+			content = fs.readFileSync(filePath);
+		} catch {
+			continue;
+		}
+		for (const key of Object.keys(parse(content))) {
+			keys.add(key);
+		}
+	}
+	return keys;
+}
+
+function applyProcessEnvAtLaunch(
+	loaded: Record<string, string>,
+	keysFromEnvFiles: Set<string>,
+): void {
 	// Vite and other code may have merged `.env` into `process.env` after the real
 	// environment was set; re-apply the launch-time values for keys that existed then.
-	for (const key of Object.keys(processEnvAtLaunch)) {
+	for (const key of keysFromEnvFiles) {
 		const value = processEnvAtLaunch[key];
 		if (value === undefined) continue;
 		if (key in loaded) {
@@ -87,8 +121,10 @@ interface EnvLoaderOptions {
 }
 
 function getEnv({ mode, config }: EnvLoaderOptions) {
-	const loaded = loadEnv(mode, config.vite.envDir ?? fileURLToPath(config.root), '');
-	applyProcessEnvAtLaunch(loaded);
+	const envDir = config.vite.envDir ?? fileURLToPath(config.root);
+	const keysFromEnvFiles = getKeysDefinedInEnvFiles(mode, envDir);
+	const loaded = loadEnv(mode, envDir, '');
+	applyProcessEnvAtLaunch(loaded, keysFromEnvFiles);
 	const privateEnv = getPrivateEnv({
 		fullEnv: loaded,
 		viteConfig: config.vite,
